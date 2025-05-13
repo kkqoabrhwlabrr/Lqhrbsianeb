@@ -523,3 +523,45 @@ pcall(function() getfenv().script = nil end)
 pcall(function() getfenv().plugin = nil end)
 pcall(function() getfenv().loadstring = nil end)
 pcall(function() getfenv().HttpGet = nil end)
+
+-- tạo embed
+local player = game:GetService("Players").LocalPlayer
+local username = player and player.Name or "Unknown"
+
+local data = {
+    ["embeds"] = {
+        {
+            ["title"] = "Dead Rails | Auto Bond Farm V2",
+            ["description"] = string.format("User: **%s** Đã Nhặt Xong Bond!", username),
+            ["fields"] = {
+                {
+                    ["name"] = "Số Bond Nhặt Được:",
+                    ["value"] = tostring(#bondData),
+                    ["inline"] = true
+                }
+            },
+            ["color"] = 0x00FFFF,
+            ["footer"] = {
+                ["text"] = "XuanVP Hub | " .. os.date("%H:%M:%S")
+            },
+            ["timestamp"] = os.date("!%Y-%m-%dT%H:%M:%SZ")
+        }
+    },
+    ["username"] = "XuanVP"
+}
+
+-- Send webhook
+local headers = {
+    ["Content-Type"] = "application/json"
+}
+local body = game:GetService("HttpService"):JSONEncode(data)
+
+if syn and syn.request then
+    syn.request({Url = _G.url, Method = "POST", Headers = headers, Body = body})
+elseif http and http.request then
+    http.request({Url = _G.url, Method = "POST", Headers = headers, Body = body})
+elseif request then
+    request({Url = _G.url, Method = "POST", Headers = headers, Body = body})
+else
+    warn("No HTTP AVAILABLE THỬ LINK WEBHOOK KHÁC.")
+end
