@@ -283,7 +283,7 @@ local function forceSit()
     local sitAttemptStart = tick()
     while task.wait(0.1) do
         if humanoid.Sit then break end
-        if tick() - sitAttemptStart > 1 then warn("[ERJ_SCRIPT] Force sit timed out after 5 seconds."); break end
+        if tick() - sitAttemptStart > 0.2 then warn("[ERJ_SCRIPT] Force sit timed out after 5 seconds."); break end
     end
     warn("[ERJ_SCRIPT] Force sit completed or timed out.") -- Thay đổi message để rõ hơn
     pauseBondProcess = false
