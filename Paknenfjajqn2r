@@ -3,6 +3,8 @@ local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 
+local lobbyPlaceId_global = 116495829188952 -- ID của sảnh chờ, dùng để kiểm tra chung
+
 local function httpGet(url)
     local success, result = pcall(function()
         return HttpService:GetAsync(url, true)
@@ -23,11 +25,11 @@ local function executeScript(scriptCode)
     end
 end
 
--- Script: queue.lua
+-- Script: queue.lua (Chỉ chạy khi ở sảnh)
 local queue_script = [[
 repeat task.wait() until game:IsLoaded()
 
-local lobbyPlaceId = 116495829188952
+local lobbyPlaceId = 116495829188952 -- ID này được dùng nội bộ trong queue_script
 local TweenService = game:GetService("TweenService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -52,10 +54,8 @@ end
 local function tweenToPosition(targetPosition)
     local distance = (rootPart.Position - targetPosition).Magnitude
     local timeToMove = distance / moveSpeed
-
     local tweenInfo = TweenInfo.new(timeToMove, Enum.EasingStyle.Linear, Enum.EasingDirection.Out)
     local tween = TweenService:Create(rootPart, tweenInfo, {CFrame = CFrame.new(targetPosition)})
-
     tween:Play()
     return tween
 end
@@ -69,28 +69,26 @@ local function fireCreatePartyRemote()
                 gameMode = "Normal"
             }
         }
-
-        print("Firing CreateParty remote with args:", args)
         local createPartyRemote = ReplicatedStorage:WaitForChild("Shared", 10):WaitForChild("Network", 10):WaitForChild("RemoteEvent", 10):WaitForChild("CreateParty", 10)
         if createPartyRemote then
              pcall(function() createPartyRemote:FireServer(unpack(args)) end)
         else
-             warn("CreateParty remote not found!")
+             warn("[QUEUE_SCRIPT] CreateParty remote not found!")
         end
         task.wait(0.1)
     end
 end
 
-local function hasBeenTeleported()
+local function hasBeenTeleportedOutOfLobby()
     return game.PlaceId ~= lobbyPlaceId
 end
 
-local function getLowPlayerServer(cursor)
-    warn("Attempting to fetch server list - This may not work on client-side exploits.")
+local function getLowPlayerLobbyServer(cursor)
+    warn("[QUEUE_SCRIPT] Attempting to fetch lobby server list...")
     local apiUrl = "https://games.roblox.com/v1/games/" .. lobbyPlaceId .. "/servers/Public?sortOrder=Asc&limit=100"
     local url = apiUrl .. ((cursor and "&cursor=" .. cursor) or "")
     local success, response = pcall(function()
-        return game:HttpGet(url)
+        return game:HttpGet(url) -- Cân nhắc dùng HttpService:GetAsync nếu game:HttpGet bị hạn chế
     end)
 
     if success then
@@ -102,81 +100,109 @@ local function getLowPlayerServer(cursor)
         end
         return data.nextPageCursor
     end
-
-    warn("Failed to fetch server list.")
+    warn("[QUEUE_SCRIPT] Failed to fetch lobby server list.")
     return nil
 end
 
-local function startTeleportationLoop()
+local function startLobbyTeleportationLoop()
     enableNoClip()
-
-    while not hasBeenTeleported() do
+    while not hasBeenTeleportedOutOfLobby() and game.PlaceId == lobbyPlaceId do
         local tweenA = tweenToPosition(pointA)
         tweenA.Completed:Wait()
-        if hasBeenTeleported() then break end
+        if hasBeenTeleportedOutOfLobby() then break end
 
         local tweenB = tweenToPosition(pointB)
         tweenB.Completed:Wait()
-        if hasBeenTeleported() then break end
+        if hasBeenTeleportedOutOfLobby() then break end
     end
-
-    print("Successfully Teleported. Stopping teleportation & remote firing.")
+    if game.PlaceId == lobbyPlaceId then
+        print("[QUEUE_SCRIPT] Still in lobby, but teleportation loop ended (possibly by another teleport).")
+    else
+        print("[QUEUE_SCRIPT] Successfully teleported out of lobby.")
+    end
 end
 
+-- Logic chính của queue_script, chỉ chạy khi ở đúng lobbyPlaceId
 if game.PlaceId == lobbyPlaceId then
+    print("[QUEUE_SCRIPT] Executing lobby specific logic.")
     task.spawn(fireCreatePartyRemote)
-    task.spawn(startTeleportationLoop)
+    task.spawn(startLobbyTeleportationLoop)
     task.spawn(function()
-        task.wait(35)
-
-        if game.PlaceId == lobbyPlaceId then
-            warn("Attempting server hop (requires HttpGet, may fail on client)...")
+        task.wait(35) -- Chờ một khoảng thời gian trước khi thử tìm server khác
+        if game.PlaceId == lobbyPlaceId and not hasBeenTeleportedOutOfLobby() then -- Chỉ tìm server nếu vẫn còn ở sảnh
+            warn("[QUEUE_SCRIPT] Still in lobby after 35s. Attempting server hop...")
             local serverId, cursor = nil, nil
             repeat
-                cursor = getLowPlayerServer(cursor)
+                cursor = getLowPlayerLobbyServer(cursor)
                 if cursor and not serverId then
-                    serverId = cursor
+                    serverId = cursor -- cursor ở đây có thể là serverId hoặc nextPageCursor
                 end
                 task.wait(0.5)
-            until serverId or not cursor
-
-            if serverId then
-                print("Teleporting to a low-player server...")
+            until serverId or not cursor -- Dừng nếu tìm được serverId hoặc không còn cursor
+            
+            if serverId and type(serverId) == "string" then -- Đảm bảo serverId là một string (JobId)
+                print("[QUEUE_SCRIPT] Teleporting to a low-player lobby server: " .. serverId)
                 pcall(function() TeleportService:TeleportToPlaceInstance(lobbyPlaceId, serverId, player) end)
+            elseif serverId then -- Nếu serverId không phải string, nó có thể là nextPageCursor từ lần lặp cuối
+                 warn("[QUEUE_SCRIPT] No suitable server found with less than 3 players, or nextPageCursor reached.")
             else
-                warn("No suitable server found or failed to fetch server list.")
+                warn("[QUEUE_SCRIPT] No suitable lobby server found or failed to fetch server list.")
             end
         else
-            print("Not in the lobby, skipping server hop.")
+            print("[QUEUE_SCRIPT] Not in lobby anymore or already teleported, skipping server hop.")
         end
     end)
 else
-    print("Not in the local lobby. Script will not run fully.")
+    print("[QUEUE_SCRIPT] Loaded but current place is not the lobby. Script will not run its main logic.")
 end
 ]]
 
--- Script: ak.lua
+-- Script: Sit on Gun First (Chỉ chạy khi ở trong game chính)
+local sitOnGun_script = [[
+task.spawn(function()
+    if not game:IsLoaded() then game.Loaded:Wait() end
+    local player = game.Players.LocalPlayer
+    if not player.Character then player.CharacterAdded:Wait() end
+    local character = player.Character or player.CharacterAdded:Wait()
+    local hrp = character:WaitForChild("HumanoidRootPart")
+    hrp.Anchored = true 
+    task.wait(0.1)
+    hrp.CFrame = CFrame.new(323.47, 22.33, -9112.45) 
+    repeat task.wait() until workspace:FindFirstChild("RuntimeItems") and workspace.RuntimeItems:FindFirstChild("MaximGun")
+    task.wait(0.3)
+    for _, v in pairs(workspace.RuntimeItems:GetChildren()) do
+        if v.Name == "MaximGun" and v:FindFirstChild("VehicleSeat") then
+            v.VehicleSeat.Disabled = false
+        end
+    end
+    local closestGun, closestDist = nil, 400
+    for _, v in pairs(workspace.RuntimeItems:GetChildren()) do
+        if v.Name == "MaximGun" and v:FindFirstChild("VehicleSeat") then
+            local dist = (hrp.Position - v.VehicleSeat.Position).Magnitude
+            if dist < closestDist then
+                closestGun = v
+                closestDist = dist
+            end
+        end
+    end
+    if closestGun then
+        hrp.CFrame = closestGun.VehicleSeat.CFrame
+    end
+    task.wait(1)
+    hrp.Anchored = false
+    print("[SIT_ON_GUN] Script executed.")
+end)
+]]
+
+-- Script: ak.lua (Chỉ chạy khi ở trong game chính)
 local ak_script = [[
 local Players = game:GetService("Players")
-local Debris = game:GetService("Debris")
 local Workspace = game:GetService("Workspace")
-local RunService = game:GetService("RunService")
-
 local Camera = Workspace.CurrentCamera
 local LocalPlayer = Players.LocalPlayer
 local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
 local Humanoid = Character:WaitForChild("Humanoid", 10)
-if not Humanoid then
-    warn("Humanoid not found!")
-    return
-end
-
-pcall(function() Humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, false) end)
-
-local RuntimeItems = Workspace:WaitForChild("RuntimeItems", 10)
-if not RuntimeItems then
-    warn("RuntimeItems not found!")
-end
+if not Humanoid then print("[AK_SCRIPT] Humanoid not found!"); return end
 
 function UpdateCamera()
     if Camera and Camera.CameraType == Enum.CameraType.Track then
@@ -184,283 +210,245 @@ function UpdateCamera()
     end
 end
 
-function HandleSit(SeatTarget)
-    if SeatTarget and Humanoid then
-        pcall(function() SeatTarget:Sit(Humanoid) end)
-    end
-    if SeatTarget and SeatTarget.Parent and SeatTarget.Parent.Name == "MaximGun" then
-        pcall(function() Debris:AddItem(SeatTarget.Parent, 0) end)
-    end
-end
-
-function BypassAC()
-    if RuntimeItems then
-        local MaximGun = RuntimeItems:FindFirstChild("MaximGun")
-        if MaximGun then
-            local vehicleSeat = MaximGun:FindFirstChildWhichIsA("VehicleSeat",true)
-            if vehicleSeat then
-                HandleSit(vehicleSeat)
-            end
-        end
-    end
-
-    if not (RuntimeItems and RuntimeItems:FindFirstChild("MaximGun")) then
-        for i, v in pairs(Workspace:GetDescendants()) do
-            if v.Name == "MaximGun" and v:FindFirstChildWhichIsA("VehicleSeat",true) then
-                HandleSit(v:FindFirstChildWhichIsA("VehicleSeat",true))
-            end
-        end
-    end
-end
-
 if Camera then
     pcall(function() Camera:GetPropertyChangedSignal("CameraType"):Connect(UpdateCamera) end)
     UpdateCamera()
 end
-
-RunService.Heartbeat:Connect(function()
-    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
-        BypassAC()
-    end
-end)
+print("[AK_SCRIPT] Script executed.")
 ]]
 
--- Script: erj.lua
-local erj_script = [[
+-- Script: erj.lua (Chỉ chạy khi ở trong game chính)
+local erj_script = [==[
 local positions = {
-    Vector3.new(57, 3, 30000), Vector3.new(57, 3, 28000),
-    Vector3.new(57, 3, 26000), Vector3.new(57, 3, 24000),
-    Vector3.new(57, 3, 22000), Vector3.new(57, 3, 20000),
-    Vector3.new(57, 3, 18000), Vector3.new(57, 3, 16000),
-    Vector3.new(57, 3, 14000), Vector3.new(57, 3, 12000),
-    Vector3.new(57, 3, 10000), Vector3.new(57, 3, 8000),
-    Vector3.new(57, 3, 6000), Vector3.new(57, 3, 4000),
-    Vector3.new(57, 3, 2000), Vector3.new(57, 3, 0),
-    Vector3.new(57, 3, -2000), Vector3.new(57, 3, -4000),
-    Vector3.new(57, 3, -6000), Vector3.new(57, 3, -8000),
-    Vector3.new(57, 3, -10000), Vector3.new(57, 3, -12000),
-    Vector3.new(57, 3, -14000), Vector3.new(57, 3, -16000),
-    Vector3.new(57, 3, -18000), Vector3.new(57, 3, -20000),
-    Vector3.new(57, 3, -22000), Vector3.new(57, 3, -24000),
-    Vector3.new(57, 3, -26000), Vector3.new(57, 3, -28000),
-    Vector3.new(57, 3, -30000), Vector3.new(57, 3, -32000),
-    Vector3.new(57, 3, -34000), Vector3.new(57, 3, -36000),
-    Vector3.new(57, 3, -38000), Vector3.new(57, 3, -40000),
-    Vector3.new(57, 3, -42000), Vector3.new(57, 3, -44000),
-    Vector3.new(57, 3, -46000), Vector3.new(57, 3, -48000),
-    Vector3.new(57, 3, -49032)
+    Vector3.new(57, 3, 30000), Vector3.new(57, 3, 28000), Vector3.new(57, 3, 26000),
+    Vector3.new(57, 3, 24000), Vector3.new(57, 3, 22000), Vector3.new(57, 3, 20000),
+    Vector3.new(57, 3, 18000), Vector3.new(57, 3, 16000), Vector3.new(57, 3, 14000),
+    Vector3.new(57, 3, 12000), Vector3.new(57, 3, 10000), Vector3.new(57, 3, 8000),
+    Vector3.new(57, 3, 6000), Vector3.new(57, 3, 4000), Vector3.new(57, 3, 2000),
+    Vector3.new(57, 3, 0), Vector3.new(57, 3, -2000), Vector3.new(57, 3, -4000),
+    Vector3.new(57, 3, -6000), Vector3.new(57, 3, -8000), Vector3.new(57, 3, -10000),
+    Vector3.new(57, 3, -12000), Vector3.new(57, 3, -14000), Vector3.new(57, 3, -16000),
+    Vector3.new(57, 3, -18000), Vector3.new(57, 3, -20000), Vector3.new(57, 3, -22000),
+    Vector3.new(57, 3, -24000), Vector3.new(57, 3, -26000), Vector3.new(57, 3, -28000),
+    Vector3.new(57, 3, -30000), Vector3.new(57, 3, -32000), Vector3.new(57, 3, -34000),
+    Vector3.new(57, 3, -36000), Vector3.new(57, 3, -38000), Vector3.new(57, 3, -40000),
+    Vector3.new(57, 3, -42000), Vector3.new(57, 3, -44000), Vector3.new(57, 3, -46000),
+    Vector3.new(57, 3, -48000), Vector3.new(57, 3, -49032)
 }
-
 local duration = 0.9
 local bondPauseDuration = 0.9
-
 local player = game.Players.LocalPlayer
 local char = player.Character or player.CharacterAdded:Wait()
 local hrp = char:WaitForChild("HumanoidRootPart", 10)
-if not hrp then
-    warn("HumanoidRootPart not found!")
-    return
-end
+local humanoid = char:WaitForChild("Humanoid", 10)
+if not hrp or not humanoid then print("[ERJ_SCRIPT] HRP or Humanoid not found!"); return end
 
-local PlayerGui = player:FindFirstChildOfClass("PlayerGui")
-local screenGui = Instance.new("ScreenGui")
-if PlayerGui then
-    screenGui.Parent = PlayerGui
-else
-    warn("PlayerGui not found!")
-end
+local RuntimeItems_erj = workspace:WaitForChild("RuntimeItems", 10)
+if not RuntimeItems_erj then print("[ERJ_SCRIPT] RuntimeItems not found!"); return end
+local foundBonds = {}
+local bondCount = 0
+local savedSitPosition = nil
+local pauseBondProcess = false
 
---ở đây nha
+humanoid.Died:Connect(function()
+    warn("[ERJ_SCRIPT] Nhân vật đã chết! Đang chạy lại script từ link...")
+    loadstring(game:HttpGet("https://hst.sh/raw/nawinocofa"))() 
+end)
 
 task.spawn(function()
-    task.wait(1)
-    if screenGui and screenGui.Parent then
-        screenGui:Destroy()
+    while true do
+        task.wait(0.3)
+        if (hrp.Position - Vector3.new(57, 3, -49032)).Magnitude < 5 then
+            warn("[ERJ_SCRIPT] Cuối map! Chờ 7s rồi chạy lại script từ link...")
+            task.wait(7)
+            loadstring(game:HttpGet("https://hst.sh/raw/nawinocofa"))()
+            break
+        end
     end
 end)
 
-local foundBonds = {}
-local bondCount = 0
-
-local function updateBondCount()
-    if bondCounter and bondCounter.Parent then
-        bondCounter.Text = "Bonds Found: " .. tostring(bondCount)
+local function forceSit()
+    pauseBondProcess = true
+    humanoid.Sit = false
+    task.wait(0.1)
+    for _, v in pairs(workspace:WaitForChild("RuntimeItems"):GetChildren()) do
+        if v.Name == "MaximGun" and v:FindFirstChild("VehicleSeat") then
+            if (hrp.Position - v.VehicleSeat.Position).Magnitude < 100 then
+                v.VehicleSeat:Sit(humanoid)
+                savedSitPosition = v.VehicleSeat.Position -- Cập nhật lại savedSitPosition khi ngồi
+                break
+            end
+        end
     end
-end
-
-local function safeTeleport(position)
-    if hrp then
-        pcall(function()
-            hrp.CFrame = CFrame.new(position)
-        end)
+    local sitAttemptStart = tick()
+    while task.wait(0.1) do
+        if humanoid.Sit then break end
+        if tick() - sitAttemptStart > 1 then warn("[ERJ_SCRIPT] Force sit timed out after 5 seconds."); break end
     end
+    warn("[ERJ_SCRIPT] Force sit completed or timed out.") -- Thay đổi message để rõ hơn
+    pauseBondProcess = false
 end
 
-local RuntimeItems_erj = workspace:WaitForChild("RuntimeItems", 10)
-if not RuntimeItems_erj then
-    warn("RuntimeItems not found for erj_script!")
-end
+-- Ghi nhận tọa độ khi ngồi ban đầu (ĐOẠN CODE BẠN YÊU CẦU THÊM/GIỮ NGUYÊN)
+task.delay(1, function()
+    if humanoid.Sit then
+        for _, v in pairs(workspace.RuntimeItems:GetChildren()) do
+            if v.Name == "MaximGun" and v:FindFirstChild("VehicleSeat") and v.VehicleSeat.Occupant == humanoid then
+                savedSitPosition = v.VehicleSeat.Position
+                print("[ERJ_SCRIPT] Initial sit position saved:", savedSitPosition) -- Thêm log
+                break
+            end
+        end
+    end
+end)
 
+-- Phát hiện dịch về gần ghế thì ngồi lại
 task.spawn(function()
-    if hrp then
-        for _, pos in ipairs(positions) do
-            safeTeleport(pos)
-            task.wait(duration)
+    while true do
+        task.wait(0.2)
+        if savedSitPosition and (hrp.Position - savedSitPosition).Magnitude < 10 then
+            warn("[DỊCH NGƯỢC] Về gần ghế → ngồi lại")
+            forceSit()
+        end
+    end
+end)
 
-            if pos == Vector3.new(57.00, 3.00, -49032) then            
-                warn("Attempting to load external script after final position - This will likely fail on client.")
-                print("Reached final position, waiting 5 seconds...")
-                task.wait(7)
-                 local success, err = pcall(function()
-                     loadstring(game:HttpGet("https://hst.sh/raw/nawinocofa"))()
-                 end)
-                 if success then
-                    print("Executed loadstring after 5 seconds.")
-                 else
-                    warn("Failed to execute loadstring after final position: " .. tostring(err))
-                 end
-            end
-
-            if RuntimeItems_erj then
-                local bonds = RuntimeItems_erj:GetChildren()
-
-                for _, bond in ipairs(bonds) do
-                    if bond:IsA("Model") and bond.PrimaryPart and (bond.Name == "Bond" or bond.Name == "Bonds") then
-                        local bondPos = bond.PrimaryPart.Position
-                        local alreadyVisited = false
-
-                        for _, storedPos in ipairs(foundBonds) do
-                            if (bondPos - storedPos).Magnitude < 1 then
-                                alreadyVisited = true
-                                break
-                            end
-                        end
-
-                        if not alreadyVisited then
-                            table.insert(foundBonds, bondPos)
-                            bondCount = bondCount + 1
-                            safeTeleport(bondPos)
-                            print("Bond found! Teleporting to " .. tostring(bondPos))
-                            task.wait(bondPauseDuration)
-
-                            updateBondCount()
-                            safeTeleport(pos)
-                        end
-                    end
-                end
-            end
+-- Tự động ngồi lại nếu bị đứng
+task.spawn(function()
+    while true do
+        task.wait(0)
+        if humanoid and humanoid.Sit == false then
+            warn("[FORCE SIT] Phát hiện đứng → ngồi lại")
+            forceSit()
         end
     end
 end)
 
 task.spawn(function()
     task.wait(2)
-
-    if RuntimeItems_erj and hrp then
-        while true do
-            task.wait(0.1)
-
-            local items = RuntimeItems_erj
-
-            for _, bond in pairs(items:GetChildren()) do
-                if bond:IsA("Model") and bond.Name == "Bond" and bond.PrimaryPart then
-                    local dist = (bond.PrimaryPart.Position - hrp.Position).Magnitude
-                    if dist < 100 then
-                         local activateObjectRemote = game:GetService("ReplicatedStorage"):WaitForChild("Shared", 10):WaitForChild("Network", 10):WaitForChild("RemotePromise", 10):WaitForChild("Remotes", 10):WaitForChild("C_ActivateObject", 10)
-                         if activateObjectRemote then
-                            pcall(function() activateObjectRemote:FireServer(bond) end)
-                            print("Đang nhặt:", bond.Name)
-                         else
-                            warn("C_ActivateObject remote not found!")
-                        end
-                    end
+    while true do
+        repeat task.wait(0.1) until pauseBondProcess == false
+        for _, bond in pairs(RuntimeItems_erj:GetChildren()) do
+            if bond:IsA("Model") and bond.Name == "Bond" and bond.PrimaryPart then
+                if (bond.PrimaryPart.Position - hrp.Position).Magnitude < 100 then
+                    local remote = game:GetService("ReplicatedStorage"):WaitForChild("Shared", 10):WaitForChild("Network", 10):WaitForChild("RemotePromise", 10):WaitForChild("Remotes", 10):WaitForChild("C_ActivateObject", 10)
+                    if remote then pcall(function() remote:FireServer(bond) end); print("Nhặt bond:", bond.Name) end
                 end
             end
         end
     end
 end)
-]]
 
--- Script: lowserver.lua
+task.spawn(function()
+    for _, pos in ipairs(positions) do
+        repeat task.wait(0.1) until pauseBondProcess == false
+        hrp.CFrame = CFrame.new(pos)
+        task.wait(duration)
+        for _, bond in ipairs(RuntimeItems_erj:GetChildren()) do
+            if bond:IsA("Model") and bond.PrimaryPart and (bond.Name == "Bond" or bond.Name == "Bonds") then
+                local bondPos = bond.PrimaryPart.Position
+                local alreadyVisited = false
+                for _, stored in ipairs(foundBonds) do
+                    if (stored - bondPos).Magnitude < 1 then alreadyVisited = true; break end
+                end
+                if not alreadyVisited then
+                    table.insert(foundBonds, bondPos); bondCount += 1
+                    repeat task.wait(0.1) until pauseBondProcess == false
+                    hrp.CFrame = CFrame.new(bondPos)
+                    task.wait(bondPauseDuration)
+                    repeat task.wait(0.1) until pauseBondProcess == false
+                    hrp.CFrame = CFrame.new(pos) 
+                end
+            end
+        end
+    end
+    print("[ERJ_SCRIPT] Finished all positions.")
+end)
+print("[ERJ_SCRIPT] Script executed.")
+]==]
+
+-- Script: lowserver.lua (Dùng cho việc đổi server khi máu yếu, chỉ chạy khi ở game chính)
 local lowserver_script = [[
 repeat task.wait() until game:IsLoaded()
 
-local lobbyPlaceId = 116495829188952
-local Players = game:GetService("Players")
-local TeleportService = game:GetService("TeleportService")
-local HttpService = game:GetService("HttpService")
-local player = Players.LocalPlayer
+local lobbyPlaceId_lowserver = 116495829188952 -- ID sảnh để teleport về
+local Players_low = game:GetService("Players")
+local TeleportService_low = game:GetService("TeleportService")
+local HttpService_low = game:GetService("HttpService")
+local player_low = Players_low.LocalPlayer
 
-local function getLowPlayerServer(cursor)
-    warn("Attempting to fetch server list for lowserver_script - This may not work on client-side exploits.")
-    local apiUrl = "https://games.roblox.com/v1/games/" .. lobbyPlaceId .. "/servers/Public?sortOrder=Asc&limit=100"
+local function getLowPlayerServer_low(cursor)
+    warn("[LOWSERVER_SCRIPT] Attempting to fetch server list...")
+    local apiUrl = "https://games.roblox.com/v1/games/" .. lobbyPlaceId_lowserver .. "/servers/Public?sortOrder=Asc&limit=100"
     local url = apiUrl .. ((cursor and "&cursor=" .. cursor) or "")
-    local success, response = pcall(function()
-        return game:HttpGet(url)
+    local success_low, response_low = pcall(function()
+        return HttpService_low:GetAsync(url, true) -- Sử dụng HttpService thay vì game:HttpGet
     end)
 
-    if success then
-        local data = HttpService:JSONDecode(response)
-        for _, server in pairs(data.data) do
-            if server.playing < 3 and server.id ~= game.JobId then
-                return server.id
+    if success_low then
+        local data_low = HttpService_low:JSONDecode(response_low)
+        for _, server_low in pairs(data_low.data) do
+            if server_low.playing < 3 and server_low.id ~= game.JobId then
+                return server_low.id
             end
         end
-        return data.nextPageCursor
+        return data_low.nextPageCursor
     end
-
-    warn("Failed to fetch server list in lowserver_script.")
+    warn("[LOWSERVER_SCRIPT] Failed to fetch server list.")
     return nil
 end
 
-local function teleportToLowPlayerServer()
-    warn("Attempting server hop in lowserver_script (requires HttpGet, may fail on client)...")
-    local serverId, cursor = nil, nil
+local function teleportToLowPlayerServer_low()
+    warn("[LOWSERVER_SCRIPT] Attempting server hop (on low health)...")
+    local serverId_low, cursor_low = nil, nil
     repeat
-        cursor = getLowPlayerServer(cursor)
-        if cursor and not serverId then
-            serverId = cursor
+        cursor_low = getLowPlayerServer_low(cursor_low)
+        if cursor_low and type(cursor_low) == "string" and not serverId_low then -- Nếu cursor là serverId
+            serverId_low = cursor_low
+        elseif not cursor_low then -- Nếu không còn cursor (hết trang)
+            break
         end
         task.wait(0.5)
-    until serverId or not cursor
+    until serverId_low or not cursor_low 
 
-    if serverId then
-        print("Teleporting to a low-player server from lowserver_script...")
-        pcall(function() TeleportService:TeleportToPlaceInstance(lobbyPlaceId, serverId, player) end)
+    if serverId_low then
+        print("[LOWSERVER_SCRIPT] Teleporting to a low-player server: " .. serverId_low)
+        pcall(function() TeleportService_low:TeleportToPlaceInstance(lobbyPlaceId_lowserver, serverId_low, player_low) end)
     else
-        warn("No suitable server found or failed to fetch server list in lowserver_script.")
+        warn("[LOWSERVER_SCRIPT] No suitable server found or failed to fetch server list.")
     end
 end
-
-while true do
-    teleportToLowPlayerServer()
-    task.wait(5)
-end
+teleportToLowPlayerServer_low()
+print("[LOWSERVER_SCRIPT] Script executed.")
 ]]
-
 
 -- Loader: Utility functions
 local function loadHealthScript()
-    -- Executes lowserver.lua when health is low
     warn("[SYSTEM] Health low - executing embedded lowserver_script.")
     executeScript(lowserver_script)
 end
 
-local function loadDeathScript()
-    -- Executes lowserver.lua on player death
-    warn("[SYSTEM] Player died - executing death script (embedded).")
-    executeScript(lowserver_script)
+-- Loader: Main script execution functions
+local function loadLobbyScripts()
+    warn("[SYSTEM] In Lobby. Running lobby-specific script (queue_script).")
+    local success, err = executeScript(queue_script)
+    if not success then
+        warn("[LOBBY SCRIPT ERROR] queue_script failed: " .. tostring(err))
+    end
 end
 
--- Loader: Main script execution
-local function loadMainScripts()
-    warn("[SYSTEM] Loading main embedded scripts.")
-    coroutine.wrap(executeScript)(queue_script)
+local function loadMainAutofarmScripts()
+    warn("[SYSTEM] Not in Lobby. Loading main autofarm scripts.")
+    local sitSuccess, sitErr = executeScript(sitOnGun_script)
+    if not sitSuccess then
+        warn("[SitGun Error]: " .. tostring(sitErr))
+    end
+    task.wait(3) 
     coroutine.wrap(executeScript)(ak_script)
     coroutine.wrap(executeScript)(erj_script)
 end
 
--- Loader: Event monitoring (Health, Died, Tool)
+-- Loader: Event monitoring (Chỉ kích hoạt khi ở game chính)
 local function monitorPlayer()
     local player = Players.LocalPlayer
     local character = player.Character or player.CharacterAdded:Wait()
@@ -473,19 +461,16 @@ local function monitorPlayer()
 
     humanoid.HealthChanged:Connect(function()
         if humanoid.Health > 0 and humanoid.Health < (humanoid.MaxHealth * 0.3) then
-            warn("[SYSTEM] Health low - executing emergency script.")
+            warn("[SYSTEM] Health low (in main game) - executing emergency script (lowserver_script).")
             loadHealthScript()
         end
     end)
 
-    humanoid.Died:Connect(function()
-        warn("[SYSTEM] Player died - executing death script.")
-        loadDeathScript()
-    end)
+    -- Sự kiện Died đã được xử lý trong erj_script
 
     local workspaceChildAddedConnection = game:GetService("Workspace").ChildAdded:Connect(function(child)
         if player.Character and child:IsA("Tool") and child:IsDescendantOf(player.Character) then
-             warn("[SYSTEM] Tool detected within character - ak_script should be running.")
+            warn("[SYSTEM] Tool detected within character - ak_script should be running (if in main game).")
         end
     end)
 
@@ -495,25 +480,24 @@ local function monitorPlayer()
             warn("[SYSTEM] Player leaving, disconnected workspace.ChildAdded.")
         end
     end)
+    print("[SYSTEM] Player monitoring started for main game.")
 end
 
 -- Loader: Initialization and Environment Cleanup
 local function initialize()
-    if not RunService:IsStudio() then
-        warn("[SYSTEM] Initializing outside Studio.")
-        loadMainScripts()
-
-        task.spawn(function()
-            local success, err = pcall(monitorPlayer)
-            if not success then
-                warn("[ERROR] Monitoring failed: " .. tostring(err))
-            else
-                print("[SYSTEM] Player monitoring started.")
-            end
-        end)
-
-    else
+    if RunService:IsStudio() then
         warn("[WARNING] Script disabled in Studio mode")
+        return
+    end
+
+    warn("[SYSTEM] Initializing script...")
+    repeat task.wait() until game:IsLoaded() and game.PlaceId ~= 0
+
+    if game.PlaceId == lobbyPlaceId_global then
+        loadLobbyScripts()
+    else
+        loadMainAutofarmScripts()
+        task.spawn(monitorPlayer) -- Chỉ theo dõi người chơi nếu không ở sảnh
     end
 end
 
@@ -522,4 +506,4 @@ initialize()
 pcall(function() getfenv().script = nil end)
 pcall(function() getfenv().plugin = nil end)
 pcall(function() getfenv().loadstring = nil end)
-pcall(function() getfenv().HttpGet = nil end)
+-- pcall(function() getfenv().HttpGet = nil end) 
