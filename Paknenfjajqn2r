@@ -165,32 +165,67 @@ task.spawn(function()
     if not player.Character then player.CharacterAdded:Wait() end
     local character = player.Character or player.CharacterAdded:Wait()
     local hrp = character:WaitForChild("HumanoidRootPart")
-    hrp.Anchored = true 
-    task.wait(0.1)
-    hrp.CFrame = CFrame.new(323.47, 22.33, -9112.45) 
-    repeat task.wait() until workspace:FindFirstChild("RuntimeItems") and workspace.RuntimeItems:FindFirstChild("MaximGun")
-    task.wait(0.3)
-    for _, v in pairs(workspace.RuntimeItems:GetChildren()) do
-        if v.Name == "MaximGun" and v:FindFirstChild("VehicleSeat") then
-            v.VehicleSeat.Disabled = false
-        end
-    end
-    local closestGun, closestDist = nil, 400
-    for _, v in pairs(workspace.RuntimeItems:GetChildren()) do
-        if v.Name == "MaximGun" and v:FindFirstChild("VehicleSeat") then
-            local dist = (hrp.Position - v.VehicleSeat.Position).Magnitude
-            if dist < closestDist then
-                closestGun = v
-                closestDist = dist
+    local humanoid = character:WaitForChild("Humanoid")
+
+    local targetCFrame = CFrame.new(323.47, 22.33, -9112.45)
+    local attempt = 1
+    local maxAttempts = 2
+    local function trySit()
+        hrp.Anchored = true
+        hrp.CFrame = targetCFrame
+        task.wait(0.2)
+
+        repeat task.wait() until workspace:FindFirstChild("RuntimeItems") and workspace.RuntimeItems:FindFirstChild("MaximGun")
+        task.wait(0.3)
+
+        for _, v in pairs(workspace.RuntimeItems:GetChildren()) do
+            if v.Name == "MaximGun" and v:FindFirstChild("VehicleSeat") then
+                v.VehicleSeat.Disabled = false
             end
         end
+
+        local closestGun, closestDist = nil, 400
+        for _, v in pairs(workspace.RuntimeItems:GetChildren()) do
+            if v.Name == "MaximGun" and v:FindFirstChild("VehicleSeat") then
+                local dist = (hrp.Position - v.VehicleSeat.Position).Magnitude
+                if dist < closestDist then
+                    closestGun = v
+                    closestDist = dist
+                end
+            end
+        end
+
+        if closestGun then
+            hrp.CFrame = closestGun.VehicleSeat.CFrame
+        end
+
+        task.wait(1)
+        hrp.Anchored = false
+        task.wait(0.5)
+
+        -- Kiểm tra xem đã ngồi chưa
+        return humanoid.Sit and humanoid.SeatPart ~= nil
     end
-    if closestGun then
-        hrp.CFrame = closestGun.VehicleSeat.CFrame
+
+    while attempt <= maxAttempts do
+        local success = trySit()
+        if success then
+            print("[SIT_ON_GUN] Ngồi vào ghế thành công ở lần thứ", attempt)
+            return -- Không cần làm gì thêm
+        else
+            warn("[SIT_ON_GUN] Lần thử", attempt, "thất bại")
+            attempt += 1
+        end
     end
+
     task.wait(1)
-    hrp.Anchored = false
-    print("[SIT_ON_GUN] Script executed.")
+    -- Lần cuối kiểm tra lại, nếu vẫn chưa ngồi mới tự tử
+    if not humanoid.Sit or humanoid.SeatPart == nil then
+        warn("[SIT_ON_GUN] Ngồi thất bại sau 2 lần thử. Tự sát.")
+        humanoid.Health = 0
+    else
+        print("[SIT_ON_GUN] Phát hiện đã ngồi sau kiểm tra cuối.")
+    end
 end)
 ]]
 
